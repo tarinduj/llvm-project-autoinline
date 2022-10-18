@@ -308,7 +308,7 @@ llvm::shouldInline(CallBase &CB,
                    function_ref<InlineCost(CallBase &CB)> GetInlineCost,
                    OptimizationRemarkEmitter &ORE, bool EnableDeferral) {
   using namespace ore;
-  dbgs() << "Enter shouldInline......\n";
+  dbgs() << "\nEnter shouldInline......\n";
 
   InlineCost IC = GetInlineCost(CB);
   Instruction *Call = &CB;
@@ -328,8 +328,8 @@ llvm::shouldInline(CallBase &CB,
   return None;*/
 
   
-  auto CalleeName = Callee->getName();
-  auto CallerName = Caller->getName();
+  std::string CalleeName = Callee->getName().str();
+  std::string CallerName = Caller->getName().str();
 
   dbgs() << "Caller: " << CallerName << " Callee: " << CalleeName << "\n";
   std::map<StringRef, StringRef> FakeinlineMap = {
@@ -340,7 +340,7 @@ llvm::shouldInline(CallBase &CB,
 
   std::fstream inlineFile;
   std::string fname = "/homes/du286/scratch/inlineSSL/data/inlineCallsites.txt"; 
-  std::map<StringRef, StringRef> inlineMap;
+  std::map<std::string, std::string> inlineMap;
 
   inlineFile.open(fname, std::fstream::in);
   if (inlineFile.is_open()) {
@@ -355,13 +355,18 @@ llvm::shouldInline(CallBase &CB,
       caller = tp.substr(0, pos);
       callee = tp.substr(pos+2, len-1);
       //dbgs() << "caller: " << caller << " callee: " << callee << "\n";
-      inlineMap.insert(std::pair<StringRef, StringRef>(callee, caller));
+      inlineMap.insert({callee, caller});
     }
     inlineFile.close();
+  }
+  dbgs() << "Map\n";
+  for (auto it = inlineMap.begin(); it!=inlineMap.end(); ++it) {
+    dbgs() << it->first << " <- " << it->second << "\n";
   }
 
   //IF callsite not in the map, do not inline
   if (inlineMap.find(CalleeName) == inlineMap.end() || inlineMap[CalleeName] != CallerName) {
+    
     dbgs() << "NOT IN MAP ==> NOT INLINING\n";
     ORE.emit([&]() {
 	return OptimizationRemarkMissed(DEBUG_TYPE, "NeverInline", Call)
