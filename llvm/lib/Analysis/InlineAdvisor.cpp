@@ -23,6 +23,12 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <sstream>
+#include <map>
+#include <string>
+#include <stdio.h>
+#include <stdlib.h>
+#include <iostream>
+#include <fstream>
 
 using namespace llvm;
 #define DEBUG_TYPE "inline"
@@ -302,21 +308,75 @@ llvm::shouldInline(CallBase &CB,
                    function_ref<InlineCost(CallBase &CB)> GetInlineCost,
                    OptimizationRemarkEmitter &ORE, bool EnableDeferral) {
   using namespace ore;
+  dbgs() << "Enter shouldInline......\n";
 
   InlineCost IC = GetInlineCost(CB);
   Instruction *Call = &CB;
   Function *Callee = CB.getCalledFunction();
   Function *Caller = CB.getCaller();
 
-  if (IC.isAlways()) {
-    LLVM_DEBUG(dbgs() << "    Inlining " << inlineCostStr(IC)
-                      << ", Call: " << CB << "\n");
-    return IC;
+
+  // only inline add() in addsub()
+  //std::map<Expected<StringRef>, Expected<StringRef>> inlineMap = {{"addsub", "add"}, {"caller", "callee"}};
+  
+  /*if (Caller->getName() == "addsub") {
+    if (Callee->getName() == "add") {
+      dbgs() << "INLINE ONCE   "<<Callee->getName() << "\n"; 
+      return IC;
+    }
+  }
+  return None;*/
+
+  
+  auto CalleeName = Callee->getName();
+  auto CallerName = Caller->getName();
+
+  dbgs() << "Caller: " << CallerName << " Callee: " << CalleeName << "\n";
+  std::map<StringRef, StringRef> FakeinlineMap = {
+	  {"callee", "caller"}, 
+	  {"add", "addsub"},
+	  {"addsub", "main"}
+  };
+
+  std::fstream inlineFile;
+  std::string fname = "/homes/du286/scratch/inlineSSL/data/inlineCallsites.txt"; 
+  std::map<StringRef, StringRef> inlineMap;
+
+  inlineFile.open(fname, std::fstream::in);
+  if (inlineFile.is_open()) {
+    std::string tp;
+    std::string caller;
+    std::string callee;
+    while(getline(inlineFile, tp)) {
+      int len = tp.length();
+
+      size_t pos = 0;
+      pos = tp.find("->");
+      caller = tp.substr(0, pos);
+      callee = tp.substr(pos+2, len-1);
+      //dbgs() << "caller: " << caller << " callee: " << callee << "\n";
+      inlineMap.insert(std::pair<StringRef, StringRef>(callee, caller));
+    }
+    inlineFile.close();
   }
 
+  //IF callsite not in the map, do not inline
+  if (inlineMap.find(CalleeName) == inlineMap.end() || inlineMap[CalleeName] != CallerName) {
+    dbgs() << "NOT IN MAP ==> NOT INLINING\n";
+    ORE.emit([&]() {
+	return OptimizationRemarkMissed(DEBUG_TYPE, "NeverInline", Call)
+           << NV("Callee", Callee) << " not inlined into "
+           << NV("Caller", Caller) << " because the label is not to be inlined "
+           << IC;
+        });
+    setInlineRemark(CB, inlineCostStr(IC));
+    return None;    
+  }
+
+
   if (!IC) {
-    LLVM_DEBUG(dbgs() << "    NOT Inlining " << inlineCostStr(IC)
-                      << ", Call: " << CB << "\n");
+    dbgs() << "    NOT Inlining " << inlineCostStr(IC)
+                      << ", Call: " << CB << "\n";
     if (IC.isNever()) {
       ORE.emit([&]() {
         return OptimizationRemarkMissed(DEBUG_TYPE, "NeverInline", Call)
@@ -339,9 +399,9 @@ llvm::shouldInline(CallBase &CB,
   int TotalSecondaryCost = 0;
   if (EnableDeferral &&
       shouldBeDeferred(Caller, IC, TotalSecondaryCost, GetInlineCost)) {
-    LLVM_DEBUG(dbgs() << "    NOT Inlining: " << CB
+      dbgs() << "    NOT Inlining: " << CB
                       << " Cost = " << IC.getCost()
-                      << ", outer Cost = " << TotalSecondaryCost << '\n');
+                      << ", outer Cost = " << TotalSecondaryCost << '\n';
     ORE.emit([&]() {
       return OptimizationRemarkMissed(DEBUG_TYPE, "IncreaseCostInOtherContexts",
                                       Call)
@@ -354,9 +414,9 @@ llvm::shouldInline(CallBase &CB,
     // This will not be inspected to make an error message.
     return None;
   }
-
-  LLVM_DEBUG(dbgs() << "    Inlining " << inlineCostStr(IC) << ", Call: " << CB
-                    << '\n');
+  
+ dbgs() << "    Inlining " << inlineCostStr(IC) << ", Call: " << CB
+                    << '\n';
   return IC;
 }
 
