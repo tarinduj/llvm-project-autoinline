@@ -1581,6 +1581,14 @@ auto partition(R &&Range, UnaryPredicate P) {
   return std::partition(adl_begin(Range), adl_end(Range), P);
 }
 
+ /// Wrapper function to append a range to a container.
+ ///
+ /// C.insert(C.end(), R.begin(), R.end());
+ template <typename Container, typename Range>
+ inline void append_range(Container &C, Range &&R) {
+   C.insert(C.end(), R.begin(), R.end());
+ }
+
 /// Provide wrappers to std::lower_bound which take ranges instead of having to
 /// pass begin/end explicitly.
 template <typename R, typename T> auto lower_bound(R &&Range, T &&Value) {

@@ -17,11 +17,13 @@
 #include "llvm/ADT/None.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SCCIterator.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/AssumptionCache.h"
@@ -30,6 +32,7 @@
 #include "llvm/Analysis/CGSCCPassManager.h"
 #include "llvm/Analysis/CallGraph.h"
 #include "llvm/Analysis/GlobalsModRef.h"
+#include "llvm/Analysis/FunctionPropertiesAnalysis.h"
 #include "llvm/Analysis/InlineAdvisor.h"
 #include "llvm/Analysis/InlineCost.h"
 #include "llvm/Analysis/LazyCallGraph.h"
@@ -70,6 +73,9 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+#include <filesystem>
+#include <fstream>
+#include "llvm/Support/FormatVariadic.h"
 
 using namespace llvm;
 
@@ -688,6 +694,21 @@ InlinerPass::getAdvisor(const ModuleAnalysisManagerCGSCCProxy::Result &MAM,
   return *IAA->getAdvisor();
 }
 
+CallBase *getInlinableCS(Instruction &I) {
+  if (auto *CS = dyn_cast<CallBase>(&I))
+    if (Function *Callee = CS->getCalledFunction()) {
+      if (!Callee->isDeclaration()) {
+        return CS;
+      }
+    }
+  return nullptr;
+}
+
+int64_t getLocalCalls(Function &F, FunctionAnalysisManager &FAM) {
+  auto &FPI = FAM.getResult<FunctionPropertiesAnalysis>(F);
+  return FPI.DirectCallsToDefinedFunctions;
+}
+
 PreservedAnalyses InlinerPass::run(LazyCallGraph::SCC &InitialC,
                                    CGSCCAnalysisManager &AM, LazyCallGraph &CG,
                                    CGSCCUpdateResult &UR) {
@@ -740,7 +761,7 @@ PreservedAnalyses InlinerPass::run(LazyCallGraph::SCC &InitialC,
   // and eventually they all become too large to inline, rather than
   // incrementally maknig a single function grow in a super linear fashion.
   SmallVector<std::pair<CallBase *, int>, 16> Calls;
-
+  dbgs() << "test1\n";
   // Populate the initial list of calls in this SCC.
   for (auto &N : InitialC) {
     auto &ORE =
@@ -770,6 +791,8 @@ PreservedAnalyses InlinerPass::run(LazyCallGraph::SCC &InitialC,
   }
   if (Calls.empty())
     return PreservedAnalyses::all();
+
+  dbgs() << "test2\n";
 
   // Capture updatable variables for the current SCC and RefSCC.
   auto *C = &InitialC;
@@ -841,6 +864,132 @@ PreservedAnalyses InlinerPass::run(LazyCallGraph::SCC &InitialC,
         setInlineRemark(*CB, "recursive SCC split");
         continue;
       }
+
+      /* DUMPING FEATURES START */
+      
+      Function &Caller = F;
+
+      auto CalleeName = Callee.getName();
+      auto CallerName = Caller.getName();
+      
+      std::string banner = formatv("** CallBase - Caller: {0} Callee: {1} **\n\n", CallerName, CalleeName);
+      raw_string_ostream* outString = new raw_string_ostream(banner);
+
+      /* call base features */
+      *outString << "Call Base Features\n";
+
+      auto NrCtantParams = 0;
+      for (auto I = CB->arg_begin(), E = CB->arg_end(); I != E; ++I) {
+        NrCtantParams += (isa<Constant>(*I));
+      }
+
+      int64_t NodeCount = 0;
+      int64_t EdgeCount = 0;
+      // int64_t EdgesOfLastSeenNodes = 0;
+
+      std::map<const LazyCallGraph::Node *, unsigned> FunctionLevels;
+      // const int32_t InitialIRSize = 0;
+      // int32_t CurrentIRSize = 0;
+      llvm::SmallPtrSet<const LazyCallGraph::Node *, 1> NodesInLastSCC;
+      DenseSet<const LazyCallGraph::Node *> AllNodes;
+
+      CallGraph CGraph(M);
+      for (auto I = scc_begin(&CGraph); !I.isAtEnd(); ++I) {
+        const std::vector<CallGraphNode *> &CGNodes = *I;
+        unsigned Level = 0;
+        for (auto *CGNode : CGNodes) {
+          Function *F = CGNode->getFunction();
+          if (!F || F->isDeclaration())
+            continue;
+          for (auto &I : instructions(F)) {
+            if (auto *CS = getInlinableCS(I)) {
+              auto *Called = CS->getCalledFunction();
+              auto Pos = FunctionLevels.find(&CG.get(*Called));
+              // In bottom up traversal, an inlinable callee is either in the
+              // same SCC, or to a function in a visited SCC. So not finding its
+              // level means we haven't visited it yet, meaning it's in this SCC.
+              if (Pos == FunctionLevels.end())
+                continue;
+              Level = std::max(Level, Pos->second + 1);
+            }
+          }
+        }
+        for (auto *CGNode : CGNodes) {
+          Function *F = CGNode->getFunction();
+          if (F && !F->isDeclaration())
+            FunctionLevels[&CG.get(*F)] = Level;
+        }
+      }
+      for (auto KVP : FunctionLevels) {
+        AllNodes.insert(KVP.first);
+        EdgeCount += getLocalCalls(KVP.first->getFunction(), FAM);
+      }
+      NodeCount = AllNodes.size();
+
+      unsigned CallSiteHeightCaleee = CG.lookup(Callee) ? FunctionLevels.at(CG.lookup(Callee)) : 0;
+      unsigned CallSiteHeightCaller = CG.lookup(Caller) ? FunctionLevels.at(CG.lookup(Caller)) : 0;
+
+      /* cost estimate */
+      int CostEstimate = 0;
+      auto GetAssumptionCache = [&](Function &F) -> AssumptionCache & {
+        return FAM.getResult<AssumptionAnalysis>(F);
+      };
+      auto &TIR = FAM.getResult<TargetIRAnalysis>(Callee);
+      auto IsCallSiteInlinable =
+            llvm::getInliningCostEstimate(*CB, TIR, GetAssumptionCache);
+      if (IsCallSiteInlinable) {
+        // We can't inline this for correctness reasons, so return the base
+        // InlineAdvice, as we don't care about tracking any state changes (which
+        // won't happen).
+        CostEstimate = *IsCallSiteInlinable;
+      }
+      
+
+      *outString << "CallSiteHeightCaleee: " << CallSiteHeightCaleee << "\n";
+      *outString << "CallSiteHeightCaller: " << CallSiteHeightCaller << "\n";
+      *outString << "NodeCount: " << NodeCount << "\n";
+      *outString << "EdgeCount: " << EdgeCount << "\n";
+      *outString << "NrCtantParams: " << NrCtantParams << "\n";
+      *outString << "CostEstimate: " << CostEstimate << "\n\n";
+
+      /* call base features end */
+      auto &CallerFPI = FAM.getResult<FunctionPropertiesAnalysis>(Caller);
+      auto &CalleeFPI = FAM.getResult<FunctionPropertiesAnalysis>(Callee);
+      
+      *outString << CallerName << " Features\n";
+      CallerFPI.print(*outString);
+      *outString << CalleeName << " Features\n";
+      CalleeFPI.print(*outString);
+
+      /* get the file to write output */
+
+      std::string outDirPath = "/homes/ajayati/scratch/autoinline/results/spec2006/";
+      std::string inDirPathPrefix = "/u/scratch1/ajayati/autoinline/benchmarks/spec2006/benchspec/CPU2006";
+      std::string delimiter = "/";
+
+      std::string Filename = M.getSourceFileName();
+      llvm::SmallString<128> FilenameVec = StringRef(Filename);
+      llvm::sys::fs::make_absolute(FilenameVec);
+      std::string inDirPath = FilenameVec.str().str();
+
+      inDirPath.erase(0, inDirPathPrefix.length() + delimiter.length());
+      replace(inDirPath.begin(), inDirPath.end(), '/', 'F');
+      dbgs() << inDirPath << "\n";
+
+      std::string outFilePath = outDirPath + inDirPath + ".ft";
+      dbgs() << "outFilePath :" << outFilePath << "\n";
+
+      std::ofstream outFile;
+      outFile.open(outFilePath, std::ios_base::app);
+
+      outFile  << outString->str();
+
+      outFile.close();
+
+
+      // dbgs() << outString->str();
+
+      /* DUMPING FEATURES END */  
 
       auto Advice = Advisor.getAdvice(*CB);
       // Check whether we want to inline this callsite.

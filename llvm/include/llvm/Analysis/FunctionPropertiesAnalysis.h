@@ -11,25 +11,35 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_FUNCTIONPROPERTIESANALYSIS_H_
-#define LLVM_FUNCTIONPROPERTIESANALYSIS_H_
+#ifndef LLVM_ANALYSIS_FUNCTIONPROPERTIESANALYSIS_H
+#define LLVM_ANALYSIS_FUNCTIONPROPERTIESANALYSIS_H
 
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/iterator_range.h"
+#include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/PassManager.h"
 
 namespace llvm {
 class Function;
 class LoopInfo;
 
-/*
-/// If the user specifies the -func-properties-analysis argument on an LLVM tool command line
-/// then the value of this boolean will be true, otherwise false.
-/// This is the storage for the -func-properties-analysis option.
-extern bool FunctionPropertiesAnalysisIsEnabled;
-*/
 class FunctionPropertiesInfo {
+  friend class FunctionPropertiesUpdater;
+  void updateForBB(const BasicBlock &BB, int64_t Direction);
+  void updateAggregateStats(const Function &F, const LoopInfo &LI);
+  void reIncludeBB(const BasicBlock &BB);
+
 public:
-  static FunctionPropertiesInfo getFunctionPropertiesInfo(const Function &F,
-                                                          const LoopInfo &LI);
+  static FunctionPropertiesInfo
+  getFunctionPropertiesInfo(const Function &F, FunctionAnalysisManager &FAM);
+
+  bool operator==(const FunctionPropertiesInfo &FPI) const {
+    return std::memcmp(this, &FPI, sizeof(FunctionPropertiesInfo)) == 0;
+  }
+
+  bool operator!=(const FunctionPropertiesInfo &FPI) const {
+    return !(*this == FPI);
+  }
 
   void print(raw_ostream &OS) const;
 
@@ -63,6 +73,9 @@ public:
 
   // Number of Top Level Loops in the Function
   int64_t TopLevelLoopCount = 0;
+
+  // All non-debug instructions
+  int64_t TotalInstructionCount = 0;
 };
 
 // Analysis pass
@@ -72,9 +85,9 @@ class FunctionPropertiesAnalysis
 public:
   static AnalysisKey Key;
 
-  using Result = FunctionPropertiesInfo;
+  using Result = const FunctionPropertiesInfo;
 
-  Result run(Function &F, FunctionAnalysisManager &FAM);
+  FunctionPropertiesInfo run(Function &F, FunctionAnalysisManager &FAM);
 };
 
 /// Printer pass for the FunctionPropertiesAnalysis results.
@@ -88,41 +101,24 @@ public:
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
 };
 
-/*
-/// This class implements -func-properties-analysis functionality for new pass manager.
-class FunctionPropertiesHandler {
-  /// Value of this type is capable of uniquely identifying pass invocations.
-  /// It is a pair of string Pass-Identifier (which for now is common
-  /// to all the instance of a given pass) + sequential invocation counter.
-  using PassInvocationID = std::pair<StringRef, unsigned>;
-
-  /// Custom output stream to print timing information into.
-  /// By default (== nullptr) we emit time report into the stream created by
-  /// CreateInfoOutputFile().
-  raw_ostream *OutStream = nullptr;
-
-  bool Enabled;
-
+/// Correctly update FunctionPropertiesInfo post-inlining. A
+/// FunctionPropertiesUpdater keeps the state necessary for tracking the changes
+/// llvm::InlineFunction makes. The idea is that inlining will at most modify
+/// a few BBs of the Caller (maybe the entry BB and definitely the callsite BB)
+/// and potentially affect exception handling BBs in the case of invoke
+/// inlining.
+class FunctionPropertiesUpdater {
 public:
-  FunctionPropertiesHandler(bool Enabled = FunctionPropertiesAnalysisIsEnabled);
+  FunctionPropertiesUpdater(FunctionPropertiesInfo &FPI, const CallBase &CB);
 
-  // We intend this to be unique per-compilation, thus no copies.
-  FunctionPropertiesHandler(const FunctionPropertiesHandler &) = delete;
-  void operator = (const FunctionPropertiesHandler &) = delete;
-
-  void registerCallbacks(PassInstrumentationCallbacks &PIC);
-
-  /// Set a custom output stream for subsequent reporting.
-  void setOutStream(raw_ostream &OutStream);
+  void finish(FunctionAnalysisManager &FAM) const;
 
 private:
-  /// Dumps information for running/triggered timers, useful for debugging
-  LLVM_DUMP_METHOD void dump() const;
+  FunctionPropertiesInfo &FPI;
+  const BasicBlock &CallSiteBB;
+  const Function &Caller;
 
-  // Implementation of pass instrumentation callbacks.
-  void runAfterPass(StringRef PassID);
-}; */
-
+  DenseSet<const BasicBlock *> Successors;
+};
 } // namespace llvm
-
-#endif // LLVM_FUNCTIONPROPERTIESANALYSIS_H_
+#endif // LLVM_ANALYSIS_FUNCTIONPROPERTIESANALYSIS_H
